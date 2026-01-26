@@ -33,7 +33,32 @@ def unfreeze_stage(backbone, model, stage):
         model = model.module
 
     # RESNET
-    if backbone in ['resnet50', 'resnet50_224', 'resnet18_224']:
+    if backbone in ['resnet50_224']:
+        if stage == 1:
+            for p in model.layer4[2].parameters(): p.requires_grad = True
+            for p in model.layer4[1].parameters(): p.requires_grad = True
+        elif stage == 2:
+            for p in model.layer4[0].parameters(): p.requires_grad = True
+            for p in model.layer3[5].parameters(): p.requires_grad = True
+        elif stage == 3:
+            for p in model.layer3[4].parameters(): p.requires_grad = True
+            for p in model.layer3[3].parameters(): p.requires_grad = True
+        elif stage == 4:
+            for p in model.layer3[2].parameters(): p.requires_grad = True
+            for p in model.layer3[1].parameters(): p.requires_grad = True
+        elif stage == 5:
+            for p in model.layer3[0].parameters(): p.requires_grad = True
+            for p in model.layer2[3].parameters(): p.requires_grad = True
+        elif stage == 6:
+            for p in model.layer2[2].parameters(): p.requires_grad = True
+            for p in model.layer2[1].parameters(): p.requires_grad = True
+        elif stage == 7:
+            for p in model.layer2[0].parameters(): p.requires_grad = True
+            for p in model.layer1[2].parameters(): p.requires_grad = True
+        elif stage >= 8:
+            for p in model.parameters(): p.requires_grad = True
+        
+    elif backbone in ['resnet50', 'resnet18_224']:
         if stage == 1:
             for p in model.layer4.parameters(): p.requires_grad = True
         elif stage == 2:
@@ -98,7 +123,7 @@ def main(model_id, dataset, args):
         if model_id not in MODEL_FACTORY:
             raise ValueError(f"{model_id} is an invalid model name")
 
-        model, transformation = MODEL_FACTORY[model_id](in_channels=in_chnls, num_classes=num_classes)
+        model, transformation = MODEL_FACTORY[model_id](in_channels=in_chnls, num_classes=num_classes, pre_trained=args.pre_trained)
         # init the dataset
         df_path_train = '/scratch/gssodhi/melanoma/isic2018/ISIC2018_Task3_Training_GroundTruth/ISIC2018_Task3_Training_GroundTruth.csv'
         df_path_val = '/scratch/gssodhi/melanoma/isic2018/ISIC2018_Task3_Validation_GroundTruth/ISIC2018_Task3_Validation_GroundTruth.csv'
@@ -137,7 +162,7 @@ def main(model_id, dataset, args):
         if model_id not in MODEL_FACTORY:
             raise ValueError(f"{model_id} is an invalid model name")
 
-        model, transformation = MODEL_FACTORY[model_id](in_channels=in_chnls, num_classes=num_classes)
+        model, transformation = MODEL_FACTORY[model_id](in_channels=in_chnls, num_classes=num_classes, pre_trained=args.pre_trained)
 
         df = pd.read_csv("/scratch/gssodhi/melanoma/ISIC_2020_Training_GroundTruth.csv")
 
@@ -303,12 +328,23 @@ def main(model_id, dataset, args):
         START = checkpoint['epoch'] + 1
 
     print("=> TRAINING STARTED")
-    # If using layer freezing: the epochs to unfreeze some portion of the layer
-    e1, e2, e3, e4 = 5, 10, 15, 20
-    for epoch in range(START, args.epochs):
 
-        if args.freeze and epoch in [e1, e2, e3, e4]:
-            stage = {e1:1, e2:2, e3:3, e4:4}[epoch]
+    if not args.pre_trained:
+        warnings.warn("Training from scratch. If you want pre-trained model, add the --PT flag")
+    # If using layer freezing: the epochs to unfreeze some portion of the layer
+
+    if args.model_id in ['reset50_224']:
+        unfreeze_epochs = [10, 20, 30, 40, 50, 60, 70, 80]
+    else:
+        unfreeze_epochs = [5, 10, 15, 20]
+    
+    # only resnet50_224 had 8 stages of unfreezing other models unfreeze in 4 stages
+    stage_map = dict(zip(unfreeze_epochs, range(1, len(unfreeze_epochs)+1)))
+
+    for epoch in range(START, args.epochs):
+        if args.freeze and epoch in unfreeze_epochs:
+            
+            stage = stage_map[epoch]
             unfreeze_stage(model_id, model, stage)
             
             print(f"Unfreezing Stage: {stage}")
@@ -442,7 +478,7 @@ class model_config:
     batch_size: int = 128
     num_worker:int = 8
     lr: float = 1e-5
-    epochs: int = 50
+    epochs: int = 100
     resume: bool = False
     resume_model_path: str = '/scratch/gssodhi/melanoma/checkpoint/chkpt_efNet'
     save_model_path: str = '/scratch/gssodhi/melanoma/checkpoint/chkpt_efNet'
@@ -450,13 +486,17 @@ class model_config:
     run: str = 'run'
     freeze: bool = False
     loss: str = 'BCE'
+    pre_trained: bool = True
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(
         description='RUN Baseline model of ISIC')
-
+    
+    parser.add_argument('--PT', 
+                        action='store_true', 
+                        help='flag to load pre-trained model')
     parser.add_argument('--data_flag',
                         default='isic2020',
                         type=str)
@@ -496,7 +536,8 @@ if __name__ == '__main__':
         log_file_path = f'/home/gssodhi/melanoma/baselines/data/{model_id}_{dataset}',
         run = run, 
         freeze = cli_args.freeze,
-        loss = cli_args.loss
+        loss = cli_args.loss,
+        pre_trained = cli_args.PT
     )
 
     if cli_args.freeze and model_id not in ['resnet50', 'efficientnet', 'conv_T', 'conv_b', 'resnet50_224']:
@@ -508,6 +549,9 @@ if __name__ == '__main__':
     
     if cli_args.loss == 'focal' and dataset == 'isic2018':
         raise ValueError("The current implementation of focal loss is for binary classification only and isic2018 is mutliclass")
+    
+    if dataset == 'resnet50':
+        raise ValueError("resnet50 is outdated try resnet50_224 or resnet18_224")
     
     main(model_id, dataset, args)
     

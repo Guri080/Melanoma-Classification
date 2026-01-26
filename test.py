@@ -3,7 +3,7 @@ import torch.nn as nn
 import models
 
 
-model, _ = models.ResNet_50_224(3, 2)
+model, _ = models.EfficientNet(3, 2)
 
 # Total parameters
 total_params = sum(p.numel() for p in model.parameters())

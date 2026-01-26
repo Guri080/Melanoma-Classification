@@ -99,8 +99,12 @@ def ResNet18_224(in_channels=3, num_classes=2):
 
     return model, transform
 
-def ResNet_50_224(in_channels=3, num_classes=2):
-    model = models.resnet50('IMAGENET1K_V1')
+def ResNet_50_224(in_channels=3, num_classes=2, pre_trained=True):
+
+    if pre_trained:
+        model = models.resnet50('IMAGENET1K_V1')
+    else:
+        model = models.resnet50()
 
     if in_channels != 3:
         raise ValueError("Input channels must be 3 for pretrained ResNet-50")
@@ -136,7 +140,7 @@ def ResNet_50_224(in_channels=3, num_classes=2):
     return model, transform
     
 
-def EfficientNet(in_channels=3, num_classes=2):
+def EfficientNet(in_channels=3, num_classes=2, pre_trained=True):
     """
     Creates an EfficientNetB4 model pretrained on ImageNet1k.
     
@@ -178,7 +182,7 @@ def EfficientNet(in_channels=3, num_classes=2):
 
     return model, transform
 
-def Swin_B(in_channels=3, num_classes=2):
+def Swin_B(in_channels=3, num_classes=2, pre_trained=True):
     # got this from https://huggingface.co/microsoft/swin-base-patch4-window12-384
     """
     Creates a Swin-Base model pretrained on ImageNet1k.
@@ -302,7 +306,7 @@ class _ConvTiny(nn.Module):
         x = self.MLP(x)
         return x
 
-def get_ConvBase(in_channels, num_classes):
+def get_ConvBase(in_channels, num_classes, pre_trained=True):
 
     model = _ConvBase(in_channels, num_classes, input_size=224)
 
@@ -327,7 +331,7 @@ def get_ConvBase(in_channels, num_classes):
     
     return model, transform
 
-def get_ConvTiny(in_channels, num_classes):
+def get_ConvTiny(in_channels, num_classes, pre_trained=True):
 
     model = _ConvTiny(in_channels, num_classes, input_size=224)
 
