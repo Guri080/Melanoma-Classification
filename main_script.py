@@ -294,7 +294,17 @@ def main(model_id, dataset, args):
 
     os.makedirs(args.log_file_path, exist_ok=True)  # make sure directory exists
 
-    csv_file = os.path.join(args.log_file_path, f"metrics_{args.run}.csv")
+    # csv_file = os.path.join(args.log_file_path, f"{args.run}.csv")
+
+    #NOTE: Remove this and uncomment above line
+    if args.freeze:
+        csv_file = os.path.join(args.log_file_path, "SqeFreeze.csv")
+    elif args.PT:
+        csv_file = os.path.join(args.log_file_path, "PT.csv")
+    elif not args.PT:
+        csv_file = os.path.join(args.log_file_path, "Scratch.csv")
+    else:
+        raise ValueError("Incorrect path argument")
 
     print(f"Loggin in {csv_file}")
 
@@ -324,6 +334,12 @@ def main(model_id, dataset, args):
         optimizer.load_state_dict(checkpoint['optimizer'])
         for param_group in optimizer.param_groups:
             param_group['lr'] = args.lr
+        
+        optimizer = Adam(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.lr,
+            weight_decay=5e-4
+        )
     
         START = checkpoint['epoch'] + 1
 
@@ -333,7 +349,7 @@ def main(model_id, dataset, args):
         warnings.warn("Training from scratch. If you want pre-trained model, add the --PT flag")
     # If using layer freezing: the epochs to unfreeze some portion of the layer
 
-    if args.model_id in ['reset50_224']:
+    if model_id in ['resnet50_224']:
         unfreeze_epochs = [10, 20, 30, 40, 50, 60, 70, 80]
     else:
         unfreeze_epochs = [5, 10, 15, 20]
@@ -343,7 +359,6 @@ def main(model_id, dataset, args):
 
     for epoch in range(START, args.epochs):
         if args.freeze and epoch in unfreeze_epochs:
-            
             stage = stage_map[epoch]
             unfreeze_stage(model_id, model, stage)
             
@@ -364,7 +379,18 @@ def main(model_id, dataset, args):
                 'optimizer': optimizer.state_dict(),
                 }, filename=args.save_model_path)
         
-        test_loss, test_acc, f1, auc = test(model, val_loader, criterion, device)
+        test_loss, test_acc, f1, auc, num_neg, num_pos = test(model, val_loader, criterion, device)
+
+        #TODO: remove this after done with efficient exp
+        if model_id == 'efficientnet':
+            with open(BalAccNumFile, mode='a', newline='') as f:
+                writer = csv.writer(f)
+
+                writer.writerow([
+                    epoch + 1,
+                    num_neg, 
+                    num_pos
+                ])
         
         with open(csv_file, mode='a', newline='') as f:
             writer = csv.writer(f)
@@ -454,20 +480,25 @@ def test(model, loader, criterion, device):
 
     avg_loss = running_loss / len(loader)
     balanced_acc = balanced_accuracy_score(all_labels, all_preds)
+    all_preds = np.array(all_preds)
+
+    num_negatives = np.sum(all_preds == 0)
+    num_positive = np.sum(all_preds == 1)
 
     # compute metrics
     try:
         if len(set(all_labels)) == 2:
             auc = roc_auc_score(all_labels, all_probs)
+            f1 = f1_score(all_labels, all_preds, average='binary')
         else:
             auc = roc_auc_score(all_labels, all_probs, multi_class='ovr')
-        f1 = f1_score(all_labels, all_preds, average='macro')
+            f1 = f1_score(all_labels, all_preds, average='macro')
     except ValueError:
         # occurs if only one class present in y
-        print("WARNING: hit nan in test method")
+        warnings.warn("WARNING: hit nan in test method")
         auc, f1 = float('nan'), float('nan')
 
-    return avg_loss, balanced_acc, f1, auc
+    return avg_loss, balanced_acc, f1, auc, num_negatives, num_positive
 
 def save_checkpoint(state, filename='model'):
     torch.save(state, filename + '.pth.tar')
@@ -478,7 +509,7 @@ class model_config:
     batch_size: int = 128
     num_worker:int = 8
     lr: float = 1e-5
-    epochs: int = 100
+    epochs: int = 150
     resume: bool = False
     resume_model_path: str = '/scratch/gssodhi/melanoma/checkpoint/chkpt_efNet'
     save_model_path: str = '/scratch/gssodhi/melanoma/checkpoint/chkpt_efNet'
@@ -513,6 +544,9 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', 
                         default=128,
                         type=int)
+    parser.add_argument('--epochs', 
+                        default=100,
+                        type=int)
     parser.add_argument('--loss', 
                         default='CE',
                         type=str)
@@ -524,16 +558,15 @@ if __name__ == '__main__':
 
     model_id = cli_args.model_flag
     dataset = cli_args.data_flag
-    resume_bool = cli_args.resume
-    batch_size_cli = cli_args.batch_size
     run = cli_args.run
 
     args = model_config(
         resume_model_path = f'/scratch/gssodhi/melanoma/checkpoint/chkpt_{model_id}_{dataset}_{run}.pth.tar',
         save_model_path = f'/scratch/gssodhi/melanoma/checkpoint/chkpt_{model_id}_{dataset}_{run}',
-        resume = resume_bool,
-        batch_size=batch_size_cli,
-        log_file_path = f'/home/gssodhi/melanoma/baselines/data/{model_id}_{dataset}',
+        epochs = cli_args.epochs,
+        resume = cli_args.resume,
+        batch_size= cli_args.batch_size,
+        log_file_path = f'/home/gssodhi/melanoma/baselines/data/summary/{model_id}_{dataset}',
         run = run, 
         freeze = cli_args.freeze,
         loss = cli_args.loss,
