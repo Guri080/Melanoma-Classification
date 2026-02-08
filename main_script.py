@@ -68,14 +68,24 @@ def unfreeze_stage(backbone, model, stage):
         elif stage >= 4:
             for p in model.parameters(): p.requires_grad = True
 
-    # EFFICIENTNET
+    # EFFICIENTNET (Even though there are 8 stages the model is fully unfreezed by the 7th stage)
     elif backbone == 'efficientnet':
         if stage == 1:
-            for p in model.blocks[-3:].parameters(): p.requires_grad = True
+            for p in model.features[7].parameters(): p.requires_grad = True
         elif stage == 2:
-            for p in model.blocks[-6:].parameters(): p.requires_grad = True
-        elif stage >= 3:
-            for p in model.features.parameters(): p.requires_grad = True
+            for p in model.features[6].parameters(): p.requires_grad = True
+        elif stage == 3:
+            for p in model.features[5].parameters(): p.requires_grad = True
+        elif stage == 4:
+            for p in model.features[4].parameters(): p.requires_grad = True
+        elif stage == 5:
+            for p in model.features[3].parameters(): p.requires_grad = True
+        elif stage == 6:
+            for p in model.features[2].parameters(): p.requires_grad = True
+        elif stage == 7:
+            for p in model.features[1].parameters(): p.requires_grad = True
+        elif stage >= 8:
+            for p in model.parameters(): p.requires_grad = True
 
     # SWIN TRANSFORMER
     elif backbone == 'swin':
@@ -85,15 +95,6 @@ def unfreeze_stage(backbone, model, stage):
             for p in model.layers[-2].parameters(): p.requires_grad = True
         elif stage >= 3:
             for p in model.parameters(): p.requires_grad = True
-
-    # CUSTOM CNN
-    elif backbone in ['conv_T', 'conv_B']:
-        if stage == 1:
-            for p in model.features[-1].parameters(): p.requires_grad = True
-        elif stage == 2:
-            for p in model.features[-2].parameters(): p.requires_grad = True
-        elif stage >= 3:
-            for p in model.features.parameters(): p.requires_grad = True
 
     else:
         raise ValueError("Unknown model type — cannot unfreeze stage")
@@ -294,17 +295,7 @@ def main(model_id, dataset, args):
 
     os.makedirs(args.log_file_path, exist_ok=True)  # make sure directory exists
 
-    # csv_file = os.path.join(args.log_file_path, f"{args.run}.csv")
-
-    #NOTE: Remove this and uncomment above line
-    if args.freeze:
-        csv_file = os.path.join(args.log_file_path, "SqeFreeze.csv")
-    elif args.PT:
-        csv_file = os.path.join(args.log_file_path, "PT.csv")
-    elif not args.PT:
-        csv_file = os.path.join(args.log_file_path, "Scratch.csv")
-    else:
-        raise ValueError("Incorrect path argument")
+    csv_file = os.path.join(args.log_file_path, f"{args.run}.csv")
 
     print(f"Loggin in {csv_file}")
 
@@ -319,6 +310,7 @@ def main(model_id, dataset, args):
                 "val_acc",
                 "f1_score",
                 "auc",
+                "all_probs"
             ])
 
     START = 0
@@ -347,14 +339,9 @@ def main(model_id, dataset, args):
 
     if not args.pre_trained:
         warnings.warn("Training from scratch. If you want pre-trained model, add the --PT flag")
-    # If using layer freezing: the epochs to unfreeze some portion of the layer
-
-    if model_id in ['resnet50_224']:
-        unfreeze_epochs = [10, 20, 30, 40, 50, 60, 70, 80]
-    else:
-        unfreeze_epochs = [5, 10, 15, 20]
     
-    # only resnet50_224 had 8 stages of unfreezing other models unfreeze in 4 stages
+    # If using layer freezing: the epochs to unfreeze some portion of the layer
+    unfreeze_epochs = [10, 20, 30, 40, 50, 60, 70, 80]
     stage_map = dict(zip(unfreeze_epochs, range(1, len(unfreeze_epochs)+1)))
 
     for epoch in range(START, args.epochs):
@@ -379,19 +366,8 @@ def main(model_id, dataset, args):
                 'optimizer': optimizer.state_dict(),
                 }, filename=args.save_model_path)
         
-        test_loss, test_acc, f1, auc, num_neg, num_pos = test(model, val_loader, criterion, device)
+        test_loss, test_acc, f1, auc, all_probs = test(model, val_loader, criterion, device)
 
-        #TODO: remove this after done with efficient exp
-        if model_id == 'efficientnet':
-            with open(BalAccNumFile, mode='a', newline='') as f:
-                writer = csv.writer(f)
-
-                writer.writerow([
-                    epoch + 1,
-                    num_neg, 
-                    num_pos
-                ])
-        
         with open(csv_file, mode='a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -401,7 +377,8 @@ def main(model_id, dataset, args):
                 test_loss,
                 test_acc,
                 f1,
-                auc
+                auc,
+                all_probs
         ])
 
         print(f"Epoch {epoch+1}/{args.epochs} | "
@@ -470,6 +447,7 @@ def test(model, loader, criterion, device):
             all_preds.extend(preds.detach().cpu().numpy())
             all_labels.extend(y.detach().cpu().numpy())
             
+            
             # for ROC-AUC: if 2-class, pick class 1 probabilities
             if probs.shape[1] == 2:
                 probs_for_auc = probs[:, 1]
@@ -498,7 +476,7 @@ def test(model, loader, criterion, device):
         warnings.warn("WARNING: hit nan in test method")
         auc, f1 = float('nan'), float('nan')
 
-    return avg_loss, balanced_acc, f1, auc, num_negatives, num_positive
+    return avg_loss, balanced_acc, f1, auc, all_probs
 
 def save_checkpoint(state, filename='model'):
     torch.save(state, filename + '.pth.tar')
@@ -552,7 +530,10 @@ if __name__ == '__main__':
                         type=str)
     parser.add_argument('--run', 
                         type=str)
-
+    parser.add_argument('--accelerator', 
+                        default='nvidia',
+                        help="choose between \'nvidia\' or \'gaudi\' ",
+                        type=str)
 
     cli_args = parser.parse_args()
 
@@ -561,8 +542,8 @@ if __name__ == '__main__':
     run = cli_args.run
 
     args = model_config(
-        resume_model_path = f'/scratch/gssodhi/melanoma/checkpoint/chkpt_{model_id}_{dataset}_{run}.pth.tar',
-        save_model_path = f'/scratch/gssodhi/melanoma/checkpoint/chkpt_{model_id}_{dataset}_{run}',
+        resume_model_path = f'/scratch/gssodhi/melanoma/checkpoint/summary/chkpt_{model_id}_{dataset}_{run}.pth.tar',
+        save_model_path = f'/scratch/gssodhi/melanoma/checkpoint/summary/chkpt_{model_id}_{dataset}_{run}',
         epochs = cli_args.epochs,
         resume = cli_args.resume,
         batch_size= cli_args.batch_size,
@@ -573,18 +554,18 @@ if __name__ == '__main__':
         pre_trained = cli_args.PT
     )
 
-    if cli_args.freeze and model_id not in ['resnet50', 'efficientnet', 'conv_T', 'conv_b', 'resnet50_224']:
+    if cli_args.freeze and model_id not in ['efficientnet', 'resnet50_224', 'swin']:
         raise ValueError(f"Layer freezing not implemented for {model_id}." +
                          " Please change model or don't pass freeze arg")
+
+    if cli_args.accelerator =='gaudi':
+        raise ValueError("Intel's Gaudi configurations not yet implemented")
 
     if cli_args.loss not in ['CE', 'focal']:
         raise ValueError(f"{cli_args.loss} is not an implemented loss function")
     
-    if cli_args.loss == 'focal' and dataset == 'isic2018':
-        raise ValueError("The current implementation of focal loss is for binary classification only and isic2018 is mutliclass")
-    
-    if dataset == 'resnet50':
-        raise ValueError("resnet50 is outdated try resnet50_224 or resnet18_224")
+    if model_id == 'resnet50':
+        raise ValueError("resnet50 is deprecated try resnet50_224 or resnet18_224")
     
     main(model_id, dataset, args)
     

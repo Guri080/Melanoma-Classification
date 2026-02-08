@@ -183,7 +183,6 @@ def EfficientNet(in_channels=3, num_classes=2, pre_trained=True):
     return model, transform
 
 def Swin_B(in_channels=3, num_classes=2, pre_trained=True):
-    # got this from https://huggingface.co/microsoft/swin-base-patch4-window12-384
     """
     Creates a Swin-Base model pretrained on ImageNet1k.
     
