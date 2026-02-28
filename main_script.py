@@ -68,7 +68,7 @@ def unfreeze_stage(backbone, model, stage):
         elif stage >= 4:
             for p in model.parameters(): p.requires_grad = True
 
-    # EFFICIENTNET (Even though there are 8 stages the model is fully unfreezed by the 7th stage)
+    # EFFICIENTNET
     elif backbone == 'efficientnet':
         if stage == 1:
             for p in model.features[7].parameters(): p.requires_grad = True
@@ -82,18 +82,52 @@ def unfreeze_stage(backbone, model, stage):
             for p in model.features[3].parameters(): p.requires_grad = True
         elif stage == 6:
             for p in model.features[2].parameters(): p.requires_grad = True
-        elif stage == 7:
-            for p in model.features[1].parameters(): p.requires_grad = True
-        elif stage >= 8:
+        elif stage >= 7:
             for p in model.parameters(): p.requires_grad = True
 
     # SWIN TRANSFORMER
     elif backbone == 'swin':
         if stage == 1:
-            for p in model.layers[-1].parameters(): p.requires_grad = True
+            # Unfreeze the final transformer blocks (deepest stage)
+            for p in model.features[7][1].parameters(): p.requires_grad = True  # Last block of stage 4
+            for p in model.features[7][0].parameters(): p.requires_grad = True  # Second-to-last block
         elif stage == 2:
-            for p in model.layers[-2].parameters(): p.requires_grad = True
-        elif stage >= 3:
+            # Unfreeze patch merging and more blocks from stage 3
+            for p in model.features[6].parameters(): p.requires_grad = True    # PatchMerging
+            for p in model.features[5][17].parameters(): p.requires_grad = True # Last block of stage 3
+            for p in model.features[5][16].parameters(): p.requires_grad = True
+        elif stage == 3:
+            # Continue unfreezing stage 3 blocks
+            for p in model.features[5][15].parameters(): p.requires_grad = True
+            for p in model.features[5][14].parameters(): p.requires_grad = True
+            for p in model.features[5][13].parameters(): p.requires_grad = True
+            for p in model.features[5][12].parameters(): p.requires_grad = True
+        elif stage == 4:
+            # More stage 3 blocks
+            for p in model.features[5][11].parameters(): p.requires_grad = True
+            for p in model.features[5][10].parameters(): p.requires_grad = True
+            for p in model.features[5][9].parameters(): p.requires_grad = True
+            for p in model.features[5][8].parameters(): p.requires_grad = True
+        elif stage == 5:
+            # More stage 3 blocks
+            for p in model.features[5][7].parameters(): p.requires_grad = True
+            for p in model.features[5][6].parameters(): p.requires_grad = True
+            for p in model.features[5][5].parameters(): p.requires_grad = True
+            for p in model.features[5][4].parameters(): p.requires_grad = True
+        elif stage == 6:
+            # Final stage 3 blocks and patch merging
+            for p in model.features[5][3].parameters(): p.requires_grad = True
+            for p in model.features[5][2].parameters(): p.requires_grad = True
+            for p in model.features[5][1].parameters(): p.requires_grad = True
+            for p in model.features[5][0].parameters(): p.requires_grad = True
+            for p in model.features[4].parameters(): p.requires_grad = True  # PatchMerging
+        elif stage == 7:
+            # Unfreeze stage 2 and stage 1
+            for p in model.features[3].parameters(): p.requires_grad = True  # Stage 2 blocks
+            for p in model.features[2].parameters(): p.requires_grad = True  # PatchMerging
+            for p in model.features[1].parameters(): p.requires_grad = True  # Stage 1 blocks
+        elif stage >= 8:
+            # Unfreeze everything including initial conv
             for p in model.parameters(): p.requires_grad = True
 
     else:
@@ -113,17 +147,42 @@ def main(model_id, dataset, args):
     "resnet18_224": models.ResNet18_224
     }
 
+    if model_id not in MODEL_FACTORY:
+        raise ValueError(f"{model_id} is an invalid model name")
+
     pos_weights = None
     sampler = None    
     # load the model with correct output classes
     if dataset == 'isic2018':
         in_chnls = 3
         num_classes = 7
+
+        if args.strategy == 'weighed_loss':
+            train_counts = df_train[class_cols].sum().astype(int)
+            total = sum(train_counts)
+
+            pos_weights = torch.tensor(total / train_counts.values, dtype=torch.float32).to(device)
+        elif args.strategy == 'sampler':
+            print("=> STRATEGY SET TO SAMPLER")
+            # computing class counts
+            class_counts = np.bincount(labels)
+            # eg [950 negatives, 50 positives]
+
+            # computing inverse frequency weights
+            class_weights = 1. / class_counts
+            # eg [1/950, 1/50]
+
+            # assign weight to each sample
+            sample_weights = class_weights[labels]
+
+            # create sampler
+            sampler = WeightedRandomSampler(
+                weights=torch.from_numpy(sample_weights).double(),
+                num_samples=len(sample_weights),  # or len(dataset)
+                replacement=True
+            )
         
         # Load model
-        if model_id not in MODEL_FACTORY:
-            raise ValueError(f"{model_id} is an invalid model name")
-
         model, transformation = MODEL_FACTORY[model_id](in_channels=in_chnls, num_classes=num_classes, pre_trained=args.pre_trained)
         # init the dataset
         df_path_train = '/scratch/gssodhi/melanoma/isic2018/ISIC2018_Task3_Training_GroundTruth/ISIC2018_Task3_Training_GroundTruth.csv'
@@ -142,27 +201,38 @@ def main(model_id, dataset, args):
         val_dataset = ISICDataset2018(df_val, root_val, transformation)
         test_dataset = ISICDataset2018(df_test, root_test, transformation)
 
-        train_loader = DataLoader(dataset=train_dataset, batch_size = args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
-        val_loader = DataLoader(dataset=val_dataset, batch_size = args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
-        # test_loader = DataLoader(dataset=test_dataset, batch_size = args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
+        if sampler is not None:
+            train_loader = DataLoader(dataset=train_dataset, 
+                                      batch_size = args.batch_size, 
+                                      num_workers=args.num_worker, 
+                                      pin_memory=True,
+                                      persistent_workers=True,
+                                      prefetch_factor=4,
+                                      sampler=sampler)
+        else:
+            train_loader = DataLoader(dataset=train_dataset, 
+                                      batch_size = args.batch_size, 
+                                      shuffle=True, 
+                                      num_workers=args.num_worker, 
+                                      pin_memory=True,
+                                      persistent_workers=True,
+                                      prefetch_factor=4)        
+        
+        val_loader = DataLoader(dataset=val_dataset, 
+                                batch_size = args.batch_size, 
+                                shuffle=False, 
+                                num_workers=args.num_worker, 
+                                pin_memory=True)
 
         print("=> Data Prep isic2018 Done")
 
         class_cols = ["MEL", "NV", "BCC", "AKIEC", "BKL", "DF", "VASC"]
-
-        train_counts = df_train[class_cols].sum().astype(int)
-        total = sum(train_counts)
-
-        pos_weights = torch.tensor(total / train_counts.values, dtype=torch.float32).to(device)
 
     elif dataset == 'isic2020':
         in_chnls = 3
         num_classes = 2
         
         # load model
-        if model_id not in MODEL_FACTORY:
-            raise ValueError(f"{model_id} is an invalid model name")
-
         model, transformation = MODEL_FACTORY[model_id](in_channels=in_chnls, num_classes=num_classes, pre_trained=args.pre_trained)
 
         df = pd.read_csv("/scratch/gssodhi/melanoma/ISIC_2020_Training_GroundTruth.csv")
@@ -180,23 +250,33 @@ def main(model_id, dataset, args):
 
         labels = np.array(train_df.target)  # shape [N], values 0/1
 
-        # computing class counts
-        class_counts = np.bincount(labels)
-        # eg [950 negatives, 50 positives]
+        if args.strategy == 'weighed_loss':
+            print("=> STRATEGY SET TO WEIGHTED_LOSS")
+            train_counts = df_train[class_cols].sum().astype(int)
+            total = sum(train_counts)
 
-        # computing inverse frequency weights
-        class_weights = 1. / class_counts
-        # eg [1/950, 1/50]
+            pos_weights = torch.tensor(total / train_counts.values, dtype=torch.float32).to(device)
+        elif args.strategy == 'sampler':
+            print("=> STRATEGY SET TO SAMPLER")
+            # computing class counts
+            class_counts = np.bincount(labels)
+            # eg [950 negatives, 50 positives]
 
-        # assign weight to each sample
-        sample_weights = class_weights[labels]
+            # computing inverse frequency weights
+            class_weights = 1. / class_counts
+            # eg [1/950, 1/50]
 
-        # create sampler
-        sampler = WeightedRandomSampler(
-            weights=torch.from_numpy(sample_weights).double(),
-            num_samples=len(sample_weights),  # or len(dataset)
-            replacement=True
-        )
+            # assign weight to each sample
+            sample_weights = class_weights[labels]
+
+            # create sampler
+            sampler = WeightedRandomSampler(
+                weights=torch.from_numpy(sample_weights).double(),
+                num_samples=len(sample_weights),  # or len(dataset)
+                replacement=True
+            )
+        elif args.strategy not in ['sampler', 'weighted_loss', None]:
+            raise valueError("Not a valid strategy please choose from 'sampler' | 'weighted_loss'")
 
         if model_id in ['resnet18_224', 'resnet50_224', 'conv_B', 'efficientnet', 'swin']:
             # NOTE: Currently there are separate tranformation splits for resnet18_224, resnet50_224, conv_B only
@@ -209,7 +289,7 @@ def main(model_id, dataset, args):
             train_dataset = ISICDataset2020(train_df, root_2020, transformation)
             val_dataset = ISICDataset2020(val_df, root_2020, transformation)
 
-        if sampler is not None and args.loss != 'focal':
+        if sampler is not None:
             train_loader = DataLoader(dataset=train_dataset, 
                                       batch_size = args.batch_size, 
                                       num_workers=args.num_worker, 
@@ -237,12 +317,6 @@ def main(model_id, dataset, args):
         print(f"Number of batches: {len(train_loader)}")
         print(f"Effective batch size per step: {args.batch_size}")
 
-        # NOTE: To use weighted loss uncommected the two lines below, but make sure to comment out lines for 
-        # sampler as well
-        
-        # counts = train_df['target'].value_counts().sort_index()  # index 0 and 1
-        # pos_weights = torch.tensor([counts[1] / counts.sum(), counts[0] / counts.sum()], dtype=torch.float32).to(device)
-
         print("=> Data Prep isic2020 Done")
         
     else:
@@ -266,8 +340,11 @@ def main(model_id, dataset, args):
         if hasattr(model, "fc"):  # ResNet-style
             for param in model.fc.parameters():
                 param.requires_grad = True
-        elif hasattr(model, "classifier"):  # EfficientNet or Swin
+        elif hasattr(model, "classifier"):  # EfficientNet
             for param in model.classifier.parameters():
+                param.requires_grad = True
+        elif hasattr(model, "head"): # swin
+            for param in model.head.parameters():
                 param.requires_grad = True
         elif hasattr(model, "MLP"):  # custom CNN (Base/Tiny)
             for param in model.MLP.parameters():
@@ -276,16 +353,11 @@ def main(model_id, dataset, args):
             raise ValueError("Unknown model head — cannot unfreeze classifier.")
 
     if args.loss == 'CE':
-        if pos_weights is not None:
-            criterion = nn.CrossEntropyLoss(weight=pos_weights)
-        else:
-            criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(weight=pos_weights) if args.strategy == 'weighted_loss' else nn.CrossEntropyLoss()
     elif args.loss == 'focal':
-        if pos_weights is not None:
-            warnings.warn("Weighted loss is not implemented for focal loss")
-        criterion = FocalLoss()
+        criterion = FocalLoss(weights=pos_weights) if args.strategy == 'weighted_loss' else FocalLoss()
     else:
-        raise ValueError("Not a valid loss fuunction")
+        raise ValueError("Not a valid loss function")
 
     optimizer = Adam(filter(lambda p: p.requires_grad, model.parameters()), 
                      lr=args.lr, 
@@ -310,7 +382,8 @@ def main(model_id, dataset, args):
                 "val_acc",
                 "f1_score",
                 "auc",
-                "all_probs"
+                "val_all_probs",
+                "train_all_probs"
             ])
 
     START = 0
@@ -358,7 +431,7 @@ def main(model_id, dataset, args):
                 weight_decay=5e-4
             )
 
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc, train_all_probs = train_one_epoch(model, train_loader, criterion, optimizer, device)
 
         save_checkpoint({
                 'epoch': epoch,
@@ -366,7 +439,7 @@ def main(model_id, dataset, args):
                 'optimizer': optimizer.state_dict(),
                 }, filename=args.save_model_path)
         
-        test_loss, test_acc, f1, auc, all_probs = test(model, val_loader, criterion, device)
+        test_loss, test_acc, f1, auc, val_all_probs = test(model, val_loader, criterion, device)
 
         with open(csv_file, mode='a', newline='') as f:
             writer = csv.writer(f)
@@ -378,7 +451,8 @@ def main(model_id, dataset, args):
                 test_acc,
                 f1,
                 auc,
-                all_probs
+                val_all_probs,
+                train_all_probs
         ])
 
         print(f"Epoch {epoch+1}/{args.epochs} | "
@@ -394,6 +468,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 
     all_labels = []
     all_preds = []
+    all_probs = []
 
     for x, y in tqdm(loader, desc='train'):
         x, y = x.to(device), y.to(device)
@@ -412,13 +487,24 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
         # predictions
         preds = out.argmax(dim=1)
 
+        # Softmax across class dimension
+        probs = torch.softmax(out, dim=1)
+
         all_labels.extend(y.detach().cpu().numpy())
         all_preds.extend(preds.detach().cpu().numpy())
+
+        # if 2-class, pick class 1 probabilities
+        if probs.shape[1] == 2:
+            probs_for_auc = probs[:, 1]
+        else:
+            probs_for_auc = probs  # multi-class (use full matrix later)
+            
+        all_probs.extend(probs_for_auc.detach().cpu().numpy())
 
     avg_loss = running_loss / len(loader)
     balanced_acc = balanced_accuracy_score(all_labels, all_preds)
 
-    return avg_loss, balanced_acc
+    return avg_loss, balanced_acc, all_probs
 
 
 
@@ -496,6 +582,7 @@ class model_config:
     freeze: bool = False
     loss: str = 'BCE'
     pre_trained: bool = True
+    strategy: str = ''
 
 
 if __name__ == '__main__':
@@ -527,12 +614,17 @@ if __name__ == '__main__':
                         type=int)
     parser.add_argument('--loss', 
                         default='CE',
+                        help='Options: "focal" | "CE"',
+                        type=str)
+    parser.add_argument('--strategy',
+                        default=None,
+                        help='Options: "sampler" | "weighed_loss". Exclude flag to pass in no strategy',
                         type=str)
     parser.add_argument('--run', 
                         type=str)
     parser.add_argument('--accelerator', 
                         default='nvidia',
-                        help="choose between \'nvidia\' or \'gaudi\' ",
+                        help='Options:"nvidia" | "gaudi"',
                         type=str)
 
     cli_args = parser.parse_args()
@@ -551,7 +643,8 @@ if __name__ == '__main__':
         run = run, 
         freeze = cli_args.freeze,
         loss = cli_args.loss,
-        pre_trained = cli_args.PT
+        pre_trained = cli_args.PT,
+        strategy = cli_args.strategy
     )
 
     if cli_args.freeze and model_id not in ['efficientnet', 'resnet50_224', 'swin']:
@@ -562,7 +655,7 @@ if __name__ == '__main__':
         raise ValueError("Intel's Gaudi configurations not yet implemented")
 
     if cli_args.loss not in ['CE', 'focal']:
-        raise ValueError(f"{cli_args.loss} is not an implemented loss function")
+        raise ValueError(f"{cli_args.loss} is not an implemented loss function. Please choose from 'CE' | 'focal'")
     
     if model_id == 'resnet50':
         raise ValueError("resnet50 is deprecated try resnet50_224 or resnet18_224")
