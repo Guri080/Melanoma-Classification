@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
-from torchvision import transforms as T
 from torchvision.models import resnet50, ResNet50_Weights
 from transformers import AutoFeatureExtractor, SwinForImageClassification
 
@@ -10,51 +9,36 @@ from urllib.request import urlopen
 from PIL import Image
 import timm
 
-def ResNet_50(in_channels=3, num_classes=2):
-    """
-    Creates a ResNet-50 model pretrained on ImageNet1k..
-    
-    Args:
-        in_channels (int): Number of input channels (e.g., 3 for RGB, 1 for grayscale)
-        num_classes (int): Number of output classes
-    
-    Returns:
-        model (torch.nn.Module): Adapated to ResNet-50 224 Pre trained model
-        transform (torchvision.transforms): Tranformation adapted for 384x384 image resolution
-    """
-    
-    if in_channels != 3:
-        raise ValueError("Input channels must be 3 for pretrained ResNet-50")
+from custom_transformations import PadSquare
 
-    # load model
-    weights = 'IMAGENET1K_V1'
-    model = models.resnet50(weights=weights)
+import torchvision.transforms.v2 as v2
+import torch
 
-    # get the input features and change the head. Preping for transfer learning
-    in_ftrs = model.fc.in_features
-    model.fc = nn.Linear(in_ftrs, num_classes, bias=True)
-
-    transform = weights.transforms()          # default: crop_size = [224], resize_size[256]
-    '''
-    DEFAULT transform
-    ImageClassification(
-    crop_size=[224]
-    resize_size=[256]
-    mean=[0.485, 0.456, 0.406]
-    std=[0.229, 0.224, 0.225]
-    interpolation=InterpolationMode.BILINEAR
-    )
-    '''
-    mean=[0.485, 0.456, 0.406]
-    std=[0.229, 0.224, 0.225]
+def _get_transformation():
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
     
-    transform384 = T.Compose([
-    T.Resize((384, 384)),
-    T.ToTensor(),
-    T.Normalize(mean=mean, std=std)
+    train_transform = v2.Compose([
+        PadSquare(fill=0, padding_mode='constant'),
+        v2.Resize((224, 224)),
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomVerticalFlip(p=0.5),
+        v2.RandomRotation(degrees=90),
+        
+        v2.ToImage(),                    
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
     ])
 
-    return model, transform384
+    val_transform = v2.Compose([
+        PadSquare(fill=0, padding_mode='constant'),   
+        v2.Resize((224, 224)),
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+    ])
+
+    return {"train": train_transform, "val": val_transform}
 
 def ResNet18_224(in_channels=3, num_classes=2):
     """
@@ -77,25 +61,8 @@ def ResNet18_224(in_channels=3, num_classes=2):
     # get the input features and change the head. Prep for transfer learning
     in_ftrs = model.fc.in_features
     model.fc = nn.Linear(in_ftrs, num_classes, bias=True)
-
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
     
-    transform = {"train": T.Compose([
-            T.Resize((224, 224)),
-
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomRotation(degrees=90),
-
-            T.ToTensor(),
-        ]),
-
-        "val": T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std)
-        ])}
+    transform = _get_transformation()
 
     return model, transform
 
@@ -116,26 +83,7 @@ def ResNet_50_224(in_channels=3, num_classes=2, pre_trained=True):
         nn.Linear(in_ftrs, num_classes)
     )
 
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-
-    transform = {
-        "train": T.Compose([
-            T.Resize((224, 224)),
-            
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomRotation(degrees=20),
-            T.ColorJitter(brightness=0.2, contrast=0.2),
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std)
-        ]),
-        "val": T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std)
-        ])
-    }
+    transform = _get_transformation()
     
     return model, transform
     
@@ -161,24 +109,7 @@ def EfficientNet(in_channels=3, num_classes=2, pre_trained=True):
     in_ftrs = model.classifier[1].in_features
     model.classifier = nn.Linear(in_ftrs, num_classes, bias=True)
 
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-
-    transform = {"train": T.Compose([
-            T.Resize((224, 224)),
-
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomRotation(degrees=90),
-
-            T.ToTensor(),
-            ]),
-
-            "val": T.Compose([
-                T.Resize((224, 224)),
-                T.ToTensor(),
-                T.Normalize(mean=mean, std=std)
-            ])}
+    transform = _get_transformation()
 
     return model, transform
 
@@ -205,24 +136,7 @@ def Swin_B(in_channels=3, num_classes=2, pre_trained=True):
     in_ftrs = model.head.in_features
     model.head = nn.Linear(in_ftrs, num_classes, bias=True)
 
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-
-    transform = {"train": T.Compose([
-            T.Resize((224, 224)),
-
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomRotation(degrees=90),
-
-            T.ToTensor(),
-            ]),
-
-            "val": T.Compose([
-                T.Resize((224, 224)),
-                T.ToTensor(),
-                T.Normalize(mean=mean, std=std)
-            ])}
+    transform = _get_transformation()
 
     return model, transform
 
@@ -309,24 +223,7 @@ def get_ConvBase(in_channels, num_classes, pre_trained=True):
 
     model = _ConvBase(in_channels, num_classes, input_size=224)
 
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-
-    transform = {"train": T.Compose([
-            T.Resize((224, 224)),
-
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomRotation(degrees=90),
-
-            T.ToTensor(),
-        ]),
-
-        "val": T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std)
-        ])}
+    transform = _get_transformation()
     
     return model, transform
 
@@ -334,24 +231,7 @@ def get_ConvTiny(in_channels, num_classes, pre_trained=True):
 
     model = _ConvTiny(in_channels, num_classes, input_size=224)
 
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-
-    transform = {"train": T.Compose([
-            T.Resize((224, 224)),
-
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomRotation(degrees=90),
-
-            T.ToTensor(),
-        ]),
-
-        "val": T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std)
-        ])}
+    transform = _get_transformation()
     
     return model, transform
     

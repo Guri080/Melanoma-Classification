@@ -24,6 +24,9 @@ from loss import FocalLoss
 
 import warnings
 
+from sklearn.metrics import confusion_matrix
+
+
 def unfreeze_stage(backbone, model, stage):
     """
     Gradually unfreezes layers depending on model type and stage index.
@@ -58,7 +61,7 @@ def unfreeze_stage(backbone, model, stage):
         elif stage >= 8:
             for p in model.parameters(): p.requires_grad = True
         
-    elif backbone in ['resnet50', 'resnet18_224']:
+    elif backbone in ['resnet18_224']:
         if stage == 1:
             for p in model.layer4.parameters(): p.requires_grad = True
         elif stage == 2:
@@ -138,7 +141,6 @@ def main(model_id, dataset, args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     MODEL_FACTORY = {
-    "resnet50": models.ResNet_50,
     "efficientnet": models.EfficientNet,
     "swin": models.Swin_B,
     "conv_B": models.get_ConvBase,
@@ -252,10 +254,9 @@ def main(model_id, dataset, args):
 
         if args.strategy == 'weighed_loss':
             print("=> STRATEGY SET TO WEIGHTED_LOSS")
-            train_counts = df_train[class_cols].sum().astype(int)
-            total = sum(train_counts)
-
-            pos_weights = torch.tensor(total / train_counts.values, dtype=torch.float32).to(device)
+            class_counts = np.bincount(labels)           # [n_benign, n_melanoma]
+            class_weights = [class_counts[1] / sum(class_counts), class_counts[0] / sum(class_counts)]
+            pos_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
         elif args.strategy == 'sampler':
             print("=> STRATEGY SET TO SAMPLER")
             # computing class counts
@@ -284,9 +285,11 @@ def main(model_id, dataset, args):
             val_transform   = transformation["val"]
 
             train_dataset = ISICDataset2020(train_df, root_2020, train_transform)
+            train_dataset_eval = ISICDataset2020(train_df, root_2020, val_transform)
             val_dataset = ISICDataset2020(val_df, root_2020, val_transform)
         else:
             train_dataset = ISICDataset2020(train_df, root_2020, transformation)
+            train_dataset_eval = ISICDataset2020(train_df, root_2020, transformation)
             val_dataset = ISICDataset2020(val_df, root_2020, transformation)
 
         if sampler is not None:
@@ -305,7 +308,7 @@ def main(model_id, dataset, args):
                                       pin_memory=True,
                                       persistent_workers=True,
                                       prefetch_factor=4)
-        
+            
         val_loader = DataLoader(dataset=val_dataset, 
                                 batch_size=args.batch_size, 
                                 shuffle=False, num_workers=args.num_worker, 
@@ -322,7 +325,6 @@ def main(model_id, dataset, args):
     else:
         raise ValueError(f"{dataset} is an invalid dataset name")
 
-    
     # move model to device
     model = model.to(device)
     if torch.cuda.device_count() > 1:
@@ -383,7 +385,10 @@ def main(model_id, dataset, args):
                 "f1_score",
                 "auc",
                 "val_all_probs",
-                "train_all_probs"
+                "train_acc_mel",
+                "train_acc_ben",
+                "train_precision",
+                "train_recall"
             ])
 
     START = 0
@@ -418,21 +423,20 @@ def main(model_id, dataset, args):
     stage_map = dict(zip(unfreeze_epochs, range(1, len(unfreeze_epochs)+1)))
 
     for epoch in range(START, args.epochs):
-        if args.freeze and epoch in unfreeze_epochs:
-            stage = stage_map[epoch]
-            unfreeze_stage(model_id, model, stage)
+        # if args.freeze and epoch in unfreeze_epochs:
+        #     stage = stage_map[epoch]
+        #     unfreeze_stage(model_id, model, stage)
             
-            print(f"Unfreezing Stage: {stage}")
+        #     print(f"Unfreezing Stage: {stage}")
             
-            # update optmizer to train unfrozen layers
-            optimizer = Adam(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                lr=args.lr,
-                weight_decay=5e-4
-            )
-
-        train_loss, train_acc, train_all_probs = train_one_epoch(model, train_loader, criterion, optimizer, device)
-
+        #     # update optmizer to train unfrozen layers
+        #     optimizer = Adam(
+        #         filter(lambda p: p.requires_grad, model.parameters()),
+        #         lr=args.lr,
+        #         weight_decay=5e-4
+        #     )
+        train_loss, train_acc, train_acc_mel, train_acc_ben, train_precision, train_recall = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        
         save_checkpoint({
                 'epoch': epoch,
                 'state_dict': model.state_dict(),
@@ -452,14 +456,16 @@ def main(model_id, dataset, args):
                 f1,
                 auc,
                 val_all_probs,
-                train_all_probs
+                train_acc_mel,
+                train_acc_ben,
+                train_precision,
+                train_recall
         ])
 
         print(f"Epoch {epoch+1}/{args.epochs} | "
             f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
             f"Val Loss: {test_loss:.4f} | Val Acc: {test_acc:.4f} | "
             f"F1: {f1:.4f} | AUC: {auc:.4f}")
-
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
@@ -468,7 +474,6 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 
     all_labels = []
     all_preds = []
-    all_probs = []
 
     for x, y in tqdm(loader, desc='train'):
         x, y = x.to(device), y.to(device)
@@ -498,15 +503,20 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
             probs_for_auc = probs[:, 1]
         else:
             probs_for_auc = probs  # multi-class (use full matrix later)
-            
-        all_probs.extend(probs_for_auc.detach().cpu().numpy())
 
     avg_loss = running_loss / len(loader)
+
     balanced_acc = balanced_accuracy_score(all_labels, all_preds)
+    cm = confusion_matrix(all_labels, all_preds)
+    acc_ben = cm[0,0] / cm[0].sum()  # TN / N
+    acc_mel = cm[1,1] / cm[1].sum()  # TP / P
+    TP = cm[1,1]
+    FP = cm[0,1]
+    FN = cm[1,0]
+    train_precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    train_recall    = TP / (TP + FN) if (TP + FN) > 0 else 0
 
-    return avg_loss, balanced_acc, all_probs
-
-
+    return avg_loss, balanced_acc, acc_mel, acc_ben, train_precision, train_recall
 
 def test(model, loader, criterion, device):
     model.eval()
@@ -597,7 +607,7 @@ if __name__ == '__main__':
                         default='isic2020',
                         type=str)
     parser.add_argument('--model_flag',
-                        default='resnet50',
+                        default='resnet50_224',
                         help='choose backbone from resnet, swin, efficientnet',
                         type=str)
     parser.add_argument('--resume', 
@@ -634,12 +644,12 @@ if __name__ == '__main__':
     run = cli_args.run
 
     args = model_config(
-        resume_model_path = f'/scratch/gssodhi/melanoma/checkpoint/summary/chkpt_{model_id}_{dataset}_{run}.pth.tar',
-        save_model_path = f'/scratch/gssodhi/melanoma/checkpoint/summary/chkpt_{model_id}_{dataset}_{run}',
+        resume_model_path = f'/scratch/gssodhi/melanoma/checkpoint/ensemble/chkpt_{model_id}_{dataset}_{run}.pth.tar',
+        save_model_path = f'/scratch/gssodhi/melanoma/checkpoint/ensemble/chkpt_{model_id}_{dataset}_{run}',
         epochs = cli_args.epochs,
         resume = cli_args.resume,
         batch_size= cli_args.batch_size,
-        log_file_path = f'/home/gssodhi/melanoma/baselines/data/summary/{model_id}_{dataset}',
+        log_file_path = f'/home/gssodhi/melanoma/baselines/data/ensemble/{model_id}_{dataset}',
         run = run, 
         freeze = cli_args.freeze,
         loss = cli_args.loss,
@@ -657,8 +667,4 @@ if __name__ == '__main__':
     if cli_args.loss not in ['CE', 'focal']:
         raise ValueError(f"{cli_args.loss} is not an implemented loss function. Please choose from 'CE' | 'focal'")
     
-    if model_id == 'resnet50':
-        raise ValueError("resnet50 is deprecated try resnet50_224 or resnet18_224")
-    
     main(model_id, dataset, args)
-    

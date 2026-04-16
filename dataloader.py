@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import cv2
 
+from custom_transformations import PadSquare
+
 class ISICDataset2020(Dataset):
 
     def __init__(self, df, root, transformation=None):
@@ -29,22 +31,12 @@ class ISICDataset2020(Dataset):
 
         image = Image.open(img_path).convert("RGB")
 
-        width, height = image.size
-        max_dim = max(width, height)
-
-        padded_image = Image.new(image.mode, (max_dim, max_dim), (0, 0, 0))
-        
-        offset_w = (max_dim - width) // 2
-        offset_h = (max_dim - height) // 2
-
-        padded_image.paste(image, (offset_w, offset_h))
-
         label = torch.tensor(row.target, dtype=torch.long)
 
         if self.transform:
-            padded_image = self.transform(padded_image)   
+            image = self.transform(image)   
         
-        return padded_image, label
+        return image, label
 
 class ISICDataset2018(Dataset):
     def __init__(self, df, root, transformation=None):
