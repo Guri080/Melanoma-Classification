@@ -156,6 +156,30 @@ For multi-class classification, macro F1 and one-vs-rest ROC-AUC are used.
 
 Experiment results are written to CSV files for later analysis.
 
+## Results
+
+Models were evaluated on **ISIC 2020** for binary melanoma classification and **ISIC 2018** for seven-class skin lesion classification using ROC-AUC and F1 score.
+
+| Model                | ISIC 2020 AUC |         F1 | ISIC 2018 AUC |         F1 |
+| -------------------- | ------------: | ---------: | ------------: | ---------: |
+| **Swin Transformer** |    **0.8498** |     0.5759 |    **0.9829** |     0.7315 |
+| **ResNet-50**        |        0.8488 | **0.5957** |        0.9769 |     0.8226 |
+| **EfficientNet**     |        0.6897 |     0.5529 |        0.9823 | **0.8324** |
+
+### Class Imbalance Experiments
+
+ResNet-50 was also used to compare loss functions and class-balancing strategies on the imbalanced dataset.
+
+| Loss              | Strategy      | Val. Accuracy |         F1 |        AUC |
+| ----------------- | ------------- | ------------: | ---------: | ---------: |
+| **Cross-Entropy** | Weighted Loss |        61.06% | **0.2621** | **0.8498** |
+| Cross-Entropy     | Sampler       |    **62.53%** |     0.2573 |     0.7679 |
+| Focal Loss        | Weighted Loss |        53.98% |     0.1212 |     0.7461 |
+| Focal Loss        | Sampler       |        60.12% |     0.2326 |     0.8214 |
+
+Overall, **Swin Transformer achieved the highest AUC on both datasets**, while ResNet-50 and EfficientNet achieved the highest F1 scores on ISIC 2020 and ISIC 2018, respectively.
+
+
 ## Project Structure
 
 ```text
